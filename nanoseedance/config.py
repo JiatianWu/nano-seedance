@@ -231,6 +231,9 @@ class GRPOConfig:
     minibatch_size: int = 8       # (rollout, timestep) pairs per grad step
     adv_eps: float = 1e-4
     guidance_scale: float = 2.0
+    eval_every: int = 0           # held-out score every N iterations (0 = off)
+    eval_prompts: int = 32
+    eval_seed: int = 7            # disjoint from the 1000+ training prompt seeds
     out_dir: str = "runs/toy/grpo"
 
 

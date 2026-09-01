@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import json
 import os
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -186,6 +187,42 @@ def grpo_step(pipe: SeedancePipeline, reference: Optional[SeedancePipeline],
 # --------------------------------------------------------------------------
 # entrypoint
 # --------------------------------------------------------------------------
+@torch.no_grad()
+def heldout_reward(pipe: SeedancePipeline, prompts: List[str], cfg: Config,
+                   rewards: RewardEnsemble, device: torch.device,
+                   seed: int, batch_size: int = 8) -> Dict[str, float]:
+    """Score the live policy on fixed prompts with the deterministic sampler.
+
+    Rollout reward measures the SDE sampling distribution the policy is being
+    trained on, which is not the thing anyone ships. This measures the ODE
+    sampler at evaluation settings instead. Prompts and noise are pinned, so
+    the only thing that differs between two calls is the policy itself.
+    """
+    rng_state = torch.get_rng_state()
+    was_training = pipe.dit.training
+    pipe.eval()
+    set_seed(seed)
+
+    totals: Dict[str, List[torch.Tensor]] = {}
+    for start in range(0, len(prompts), batch_size):
+        chunk = prompts[start:start + batch_size]
+        out = pipe.generate(chunk, device=device)
+        sample = RewardInput(
+            video=out["video"], captions=chunk, mel=out.get("mel"),
+            sample_rate=cfg.data.sample_rate, fps=cfg.data.fps,
+            hop_length=cfg.data.hop_length,
+        )
+        _, breakdown = rewards(sample)
+        for key, value in breakdown.items():
+            totals.setdefault(key, []).append(value.detach().cpu())
+
+    if was_training:
+        pipe.dit.train()
+        pipe.text_encoder.train()
+    torch.set_rng_state(rng_state)
+    return {k: float(torch.cat(v).mean()) for k, v in totals.items()}
+
+
 def main(argv: Optional[list] = None) -> str:
     parser = argparse.ArgumentParser(description="Flow-GRPO fine-tuning")
     parser.add_argument("--config", default=None)
@@ -225,6 +262,13 @@ def main(argv: Optional[list] = None) -> str:
 
     print("device %s | %d prompts x %d rollouts x %d steps per iteration"
           % (device, grpo.num_prompts, grpo.group_size, grpo.sampling_steps))
+
+    eval_prompts = random_prompts(grpo.eval_prompts, seed=grpo.eval_seed)
+    eval_curve: List[Dict[str, float]] = []
+    if grpo.eval_every:
+        base = heldout_reward(pipe, eval_prompts, cfg, rewards, device, grpo.eval_seed)
+        eval_curve.append({"iteration": 0, **base})
+        print("[heldout] iter    0 | total %.4f" % base["total"])
 
     history: List[float] = []
     for iteration in range(grpo.steps):
@@ -284,6 +328,15 @@ def main(argv: Optional[list] = None) -> str:
             **{k: float(v.mean()) for k, v in rollouts["breakdown"].items() if k != "total"},
         )
 
+        if grpo.eval_every and (iteration + 1) % grpo.eval_every == 0:
+            scores = heldout_reward(pipe, eval_prompts, cfg, rewards, device,
+                                    grpo.eval_seed)
+            eval_curve.append({"iteration": iteration + 1, **scores})
+            print("[heldout] iter %4d | total %.4f | %s"
+                  % (iteration + 1, scores["total"],
+                     "  ".join("%s %.4f" % (k, v) for k, v in scores.items()
+                               if k != "total")))
+
         if (iteration + 1) % max(1, grpo.steps // 4) == 0:
             best = int(rollouts["reward"].argmax())
             save_contact_sheet(
@@ -295,6 +348,12 @@ def main(argv: Optional[list] = None) -> str:
         first = sum(history[: max(1, len(history) // 4)]) / max(1, len(history) // 4)
         last = sum(history[-max(1, len(history) // 4):]) / max(1, len(history) // 4)
         print("mean reward: %.4f (first quarter) -> %.4f (last quarter)" % (first, last))
+
+    if len(eval_curve) > 1:
+        print("held-out total: %.4f (start) -> %.4f (end)"
+              % (eval_curve[0]["total"], eval_curve[-1]["total"]))
+        with open(os.path.join(out_dir, "heldout.json"), "w") as fh:
+            json.dump(eval_curve, fh, indent=2)
 
     ckpt_path = os.path.join(out_dir, "ckpt_last.pt")
     save_checkpoint(ckpt_path, model=pipe.dit_state(), ema=None,

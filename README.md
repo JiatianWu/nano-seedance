@@ -233,19 +233,33 @@ scale is not normalised, so only relative gaps mean anything.
 | grpo | 1.219 | 0.283 | 0.129 | 0.693 | 0.457 |
 | dpo | 1.266 | 0.317 | 0.139 | 0.703 | 0.456 |
 
-SFT is a clear gain over pretraining, mostly on `prompt_align`. **GRPO is not.**
-Its own rollout reward rises over training (1.231 to 1.276 from the first to the
-last quarter of 40 iterations), but that does not survive held-out evaluation.
-Paired over 5 seeds at GRPO's own 10-step sampling budget, GRPO minus SFT is
--0.009 +/- 0.008, with the sign flipping across seeds — indistinguishable from
-noise, and if anything slightly negative. Between-seed spread (~0.09) is an
-order of magnitude larger than the effect being claimed.
+SFT is a clear gain over pretraining, mostly on `prompt_align`. GRPO at these
+settings (40 iterations) is not — paired over 5 seeds it is -0.009 +/- 0.008
+with the sign flipping, indistinguishable from noise. Do not read a single-seed
+eval win as an improvement; an earlier version of this table showed GRPO ahead
+on seed 0 alone and it did not replicate.
 
-That gap between training reward and held-out reward is the thing to take
-seriously, and the honest reading at this scale is that 40 iterations over 4
-prompts moves the rollout distribution without moving the policy. Do not read
-a single-seed eval win as an improvement; the first version of this table
-showed GRPO ahead at 10 steps on seed 0 alone, and it did not replicate.
+Running GRPO 5x longer does move it, but less than the aggregate suggests:
+
+| metric | sft | grpo (200 iters) | delta | significant? |
+|---|---|---|---|---|
+| total | 1.2255 | 1.2459 | +0.0205 | no (t=1.50) |
+| prompt_align | 0.3163 | 0.2965 | -0.0199 | **yes** (t=-4.19) |
+| audio_prompt | 0.6846 | 0.7291 | +0.0445 | **yes** (t=13.25) |
+
+The total is flat because GRPO bought `audio_prompt` by giving up
+`prompt_align`. It optimised the cheapest component of the ensemble rather than
+getting better at the task, which an aggregate score cannot show you.
+
+**Reward hacking is easy to trigger.** The same run at lr 1e-5 instead of 3e-6
+collapses to a rigid checkerboard that ignores the prompt entirely, scoring
+`aesthetic` 0.94 against `prompt_align` 0.10. The tell needs no eyeballing:
+0.94 is above the 0.798 that *real data* scores, and any component beating real
+data is being gamed. The cause is the reward's shape —
+`clamp(std/std_ref, max=1.5)` saturates while excess total-variation costs only
+0.5x, so maximal contrast is a local optimum. `ENGINEERING_LOG.md` has the
+measurements; this is why the rewards here are verifiable ones you can audit
+against ground truth.
 
 Two GRPO settings mattered a lot for stability, both visible in the logs:
 

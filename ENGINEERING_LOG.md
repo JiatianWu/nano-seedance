@@ -24,6 +24,7 @@ the reversals are the most useful thing in here.
 | 8 | `data/synthetic.py` | Caption said "moving left", clip moved right | Shape could bounce within the first frames | Fixed (runway logic) |
 | 9 | `train_vae.py`, `train_dit.py` | `RuntimeWarning` on `float(loss)` | Converting a grad-tracking tensor | Fixed (`.detach()`) |
 | 10 | `config.py` | VAE and DiT shared one step budget | `train.steps` used by both | Fixed (`vae_steps`) |
+| 11 | `rl/rewards.py` | GRPO at lr 1e-5 converges to a checkerboard scoring `aesthetic` 0.94, above the 0.798 real-data ceiling | Contrast term saturates at a 1.5 clamp while excess total-variation costs only 0.5x | **Open** — see 2026-08-31d |
 
 ---
 
@@ -50,9 +51,91 @@ against something independently knowable.
    flipping. Between-seed spread ~0.09, an order of magnitude above the claimed
    effect. See entry 2026-08-31c.
 
+4. **"GRPO does not help at all."** The correction to (3), also too strong. At
+   5x the iterations it does move held-out reward, just not significantly on the
+   total (+0.020, t=1.50) — and what it actually does is trade `prompt_align`
+   for `audio_prompt`, both individually significant. "No effect" and "an effect
+   that cancels in the sum" are different claims and the aggregate cannot
+   distinguish them. See 2026-08-31d.
+
+5. **"The hacked policy outputs flat grey."** Read off a rollout contact sheet,
+   which is drawn from the noisy SDE path rather than the eval sampler. A flat
+   output would score 0 on `aesthetic`, not the observed 0.94 — the contradiction
+   was visible in the numbers before the image was. Rendered properly it is a
+   high-contrast checkerboard. Do not diagnose from a thumbnail.
+
 ---
 
 ## Iteration history
+
+### 2026-08-31d — GRPO scale probe: partly a scale artifact, plus reward hacking
+
+Resolves the open probe from 2026-08-31c. Two arms, 200 iterations each (5x the
+original), 8 prompts per iteration, differing only in learning rate.
+
+First, new instrumentation: `grpo.heldout_reward()` scores the live policy every
+`eval_every` iterations on fixed prompts with the *deterministic* sampler at
+evaluation settings, prompts and noise pinned so the only thing varying is the
+policy. Rollout reward measures the SDE distribution being trained on, which is
+not what anyone ships — that gap is precisely what made 2026-08-31c ambiguous.
+Verified on smoke: 0.5700 to 0.5706 over a run, so the instrument's own noise is
+~0.001.
+
+**Confound caught mid-run.** Going from 4 to 8 prompts per iteration also doubles
+the (rollout, timestep) pairs, which took optimiser steps per iteration from 9
+back to 18 — reintroducing the over-updating fixed in 2026-08-31c, visible as
+`clip_frac` 0.38 instead of 0.22. Restarted with `minibatch_size` 32 -> 64 to
+hold updates per iteration constant. A null result would have been
+uninterpretable otherwise.
+
+**Arm A, lr 3e-6.** Pinned held-out total 1.2155 -> 1.2829 over 200 iterations.
+But the independent multi-seed check (5 seeds, 48 fresh prompts each) is weaker
+and more interesting:
+
+| metric | sft | grpo | delta | t (df=4) |
+|---|---|---|---|---|
+| total | 1.2255 | 1.2459 | +0.0205 | 1.50 (n.s.) |
+| prompt_align | 0.3163 | 0.2965 | **−0.0199** | −4.19 (sig) |
+| av_sync | 0.1040 | 0.1026 | −0.0014 | −0.15 (n.s.) |
+| audio_prompt | 0.6846 | 0.7291 | **+0.0445** | 13.25 (sig) |
+| aesthetic | 0.4825 | 0.4714 | −0.0111 | −1.95 (n.s.) |
+
+So the headline total is *not* significant, but the composition shifted sharply:
+GRPO bought `audio_prompt` at the cost of `prompt_align`. It optimised the
+cheapest component of the ensemble rather than improving the model. The pinned
+eval's +0.067 overstates the effect because it is one prompt set; the multi-seed
+number (+0.020) is the honest one.
+
+**Arm B, lr 1e-5 — catastrophic reward hacking.** Held-out rises to 1.2821 by
+iteration 60, then collapses to 0.5370. Across all 5 eval seeds the policy sits
+at `aesthetic` ~0.94 with `prompt_align` ~0.10 and `audio_prompt` ~0.18. The
+output is a rigid checkerboard, identical every frame, prompt entirely ignored
+(`runs/toy/compare_grpo_lr.png`).
+
+The tell was available without looking at an image: **`aesthetic` 0.94 exceeds
+the real-data ceiling of 0.798.** Any reward component beating real data is
+being gamed, not satisfied.
+
+**Root cause, and it is a defect in the reward, not the optimiser.**
+`AestheticReward` scores `clamp(std/std_ref, max=1.5) - 0.5*max(tv/tv_ref - 1, 0)`.
+Measured on the hacked policy: std 0.6118 against a real 0.3166, tv 0.8524
+against a real 0.3742. The contrast term saturates at its 1.5 clamp while the
+excess total-variation only costs `0.5 * 1.278 = 0.639`, netting 0.861. A
+maximally-contrasty high-frequency tiling is therefore a local optimum. "More
+contrast is better, up to a generous clamp" is the wrong shape for a reward;
+it should score *closeness to* real-data statistics in both directions.
+
+**Conclusions.**
+- 40 iterations was genuinely too few, so 2026-08-31c's null was partly a scale
+  artifact — but the corrected effect on total reward is still not significant.
+- The LR was not too low. Raising it does not learn faster, it hacks.
+- The reward ensemble has an exploitable component. Fixing `AestheticReward` is
+  the prerequisite for any further RL work.
+
+**Also worth noting:** rollout contact sheets are drawn from the noisy SDE path
+and cannot be compared across checkpoints. Reading one as "flat grey" briefly
+suggested a different failure; `scripts/inspect_arms.py` renders with the eval
+sampler and reports the underlying statistics instead.
 
 ### 2026-08-31c — GRPO: stability fixed, benefit not demonstrated
 
