@@ -1,0 +1,120 @@
+# CPU-runnable end-to-end configuration.
+# Whole pipeline (VAE -> DiT -> SFT -> GRPO -> DPO) takes ~20-30 min on a laptop.
+
+data:
+  resolution: 32
+  num_frames: 17          # 1 + 4k, so the causal VAE emits 5 latent frames
+  fps: 8
+  sample_rate: 8000
+  n_fft: 256
+  hop_length: 128
+  n_mels: 32
+  mel_frames: 128
+  num_train: 2048
+  num_val: 32
+  seed: 0
+  loader: synthetic
+
+video_vae:
+  in_channels: 3
+  latent_channels: 4
+  base_channels: 32
+  spatial_compression: 4  # 32x32 -> 8x8
+  temporal_compression: 4 # 17 -> 5 frames
+  kl_weight: 1.0e-6
+
+audio_vae:
+  latent_channels: 8
+  base_channels: 64
+  temporal_compression: 4 # 128 -> 32 mel-latent frames
+  kl_weight: 1.0e-6
+
+dit:
+  dim: 192
+  depth: 6
+  num_heads: 3
+  mlp_ratio: 4.0
+  patch_t: 1
+  patch_hw: 2             # 8x8 latent -> 4x4 patches -> 80 video tokens
+  patch_audio_t: 2
+  text_dim: 192
+  text_depth: 2
+  text_heads: 3
+  max_text_len: 24
+  text_encoder: tiny
+  enable_audio: true
+  bridge_every: 2         # AV bridge after blocks 2, 4, 6
+  cond_dropout: 0.1
+
+flow:
+  logit_normal_mean: 0.0
+  logit_normal_std: 1.0
+  base_shift: 0.5
+  max_shift: 1.15
+  base_tokens: 64
+  max_tokens: 4096
+  num_sampling_steps: 24
+  guidance_scale: 4.0
+  decoupled_timestep_prob: 0.25
+
+train:
+  batch_size: 8
+  lr: 3.0e-4
+  weight_decay: 0.0
+  grad_clip: 1.0
+  steps: 3000          # DiT pretraining
+  vae_steps: 2000      # the autoencoder has a different budget to the DiT
+  warmup_steps: 100
+  log_every: 100
+  eval_every: 1000
+  ema_decay: 0.999
+  use_ema: true
+  num_workers: 0
+  device: auto
+  seed: 0
+  out_dir: runs/toy
+
+sft:
+  init_from: runs/toy/dit/ckpt_last.pt
+  steps: 400
+  lr: 5.0e-5
+  batch_size: 8
+  quality_quantile: 0.6   # keep the cleanest 40% of the corpus
+  caption_style: detailed
+  use_lora: true
+  lora_rank: 8
+  lora_alpha: 16.0
+  out_dir: runs/toy/sft
+
+reward:
+  av_sync: 1.0
+  prompt_align: 1.0
+  aesthetic: 0.25
+  normalize: true
+
+grpo:
+  init_from: runs/toy/sft/ckpt_last.pt
+  steps: 40
+  lr: 3.0e-6
+  num_prompts: 4
+  group_size: 8          # bigger groups -> less noisy within-group advantages
+  sampling_steps: 10
+  noise_level: 0.7
+  clip_range: 0.2
+  kl_coef: 0.05
+  inner_epochs: 1
+  minibatch_size: 32     # fewer optimiser steps per rollout keeps ratios near 1
+  guidance_scale: 4.0    # match the guidance used at evaluation time
+  out_dir: runs/toy/grpo
+
+dpo:
+  init_from: runs/toy/sft/ckpt_last.pt
+  steps: 60
+  lr: 1.0e-6
+  batch_size: 2
+  beta: 500.0
+  num_pairs: 32
+  candidates_per_prompt: 4
+  sampling_steps: 10
+  guidance_scale: 2.0
+  out_dir: runs/toy/dpo

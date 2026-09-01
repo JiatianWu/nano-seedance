@@ -1,0 +1,17 @@
+torch>=2.1
+torchaudio>=2.1          # mel filterbank + Griffin-Lim; pure-torch fallback exists
+numpy>=1.24
+pyyaml>=6.0
+tqdm>=4.65
+imageio>=2.31
+imageio-ffmpeg>=0.4.9   # mp4 writing; GIF fallback works without it
+pillow>=10.0
+
+# --- optional extras -------------------------------------------------------
+# Only needed for real-video training or a pretrained text encoder. The toy
+# CPU pipeline runs end to end without any of these.
+#
+# decord>=0.6.0          # fast real-video decoding (data.video_dataset)
+# torchvision>=0.16      # alternative video decoder
+# transformers>=4.40     # T5 / CLIP text encoder (models.text_encoder)
+# pytest>=7.4            # tests/

@@ -1,0 +1,120 @@
+# GPU-scale configuration. This is the shape a real (if still small) training
+# run would take: ~500M-parameter DiT, 256px / 49-frame clips, real video data.
+#
+# Set data.root and data.loader=folder, then:
+#   torchrun --nproc_per_node=8 -m nanoseedance.train_vae --config configs/base.yaml
+# (multi-GPU wiring is not included; see README "Scaling up".)
+
+data:
+  resolution: 256
+  num_frames: 49          # 1 + 4*12 -> 13 latent frames
+  fps: 24
+  sample_rate: 16000
+  n_fft: 1024
+  hop_length: 256
+  n_mels: 64
+  mel_frames: 128
+  num_train: 100000
+  num_val: 256
+  loader: folder
+  root: null              # <- point this at your video directory
+
+video_vae:
+  in_channels: 3
+  latent_channels: 16
+  base_channels: 128
+  max_channel_mult: 4
+  spatial_compression: 8  # 256 -> 32
+  temporal_compression: 4 # 49 -> 13
+  kl_weight: 1.0e-6
+
+audio_vae:
+  latent_channels: 16
+  base_channels: 256
+  temporal_compression: 4 # 128 -> 32
+  kl_weight: 1.0e-6
+
+dit:
+  dim: 1024
+  depth: 24
+  num_heads: 16
+  mlp_ratio: 4.0
+  patch_t: 1
+  patch_hw: 2             # 13 * 16 * 16 = 3328 video tokens
+  patch_audio_t: 2
+  max_text_len: 64
+  text_encoder: hf        # frozen T5; production models use a much larger one
+  hf_text_model: google/flan-t5-base
+  enable_audio: true
+  bridge_every: 2
+  cond_dropout: 0.1
+
+flow:
+  logit_normal_mean: 0.0
+  logit_normal_std: 1.0
+  base_shift: 0.5
+  max_shift: 1.15
+  base_tokens: 256
+  max_tokens: 8192
+  num_sampling_steps: 50
+  guidance_scale: 6.0
+  decoupled_timestep_prob: 0.25
+
+train:
+  batch_size: 8           # per device
+  lr: 1.0e-4
+  weight_decay: 0.01
+  grad_clip: 1.0
+  steps: 200000
+  warmup_steps: 2000
+  log_every: 50
+  eval_every: 5000
+  ckpt_every: 5000
+  ema_decay: 0.9999
+  use_ema: true
+  num_workers: 8
+  device: auto
+  out_dir: runs/base
+  amp: true
+
+sft:
+  init_from: runs/base/dit/ckpt_last.pt
+  steps: 5000
+  lr: 1.0e-5
+  batch_size: 4
+  quality_quantile: 0.8
+  caption_style: detailed
+  use_lora: false         # full fine-tune once you have the memory for it
+  out_dir: runs/base/sft
+
+reward:
+  av_sync: 1.0
+  prompt_align: 1.0
+  aesthetic: 0.25
+  normalize: true
+
+grpo:
+  init_from: runs/base/sft/ckpt_last.pt
+  steps: 500
+  lr: 1.0e-6
+  num_prompts: 16
+  group_size: 8
+  sampling_steps: 16
+  noise_level: 0.7
+  clip_range: 0.2
+  kl_coef: 0.02
+  minibatch_size: 32
+  guidance_scale: 4.5
+  out_dir: runs/base/grpo
+
+dpo:
+  init_from: runs/base/sft/ckpt_last.pt
+  steps: 2000
+  lr: 1.0e-7
+  batch_size: 2
+  beta: 5000.0
+  num_pairs: 4096
+  candidates_per_prompt: 4
+  sampling_steps: 25
+  guidance_scale: 4.5
+  out_dir: runs/base/dpo

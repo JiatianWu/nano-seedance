@@ -1,0 +1,76 @@
+# Minimal correctness run: exercises every stage in ~1 minute.
+# Produces garbage samples by design -- this is for wiring, not quality.
+
+data:
+  resolution: 16
+  num_frames: 9
+  fps: 8
+  sample_rate: 8000
+  n_fft: 256
+  hop_length: 128
+  n_mels: 32
+  mel_frames: 64
+  num_train: 64
+  num_val: 8
+  loader: synthetic
+
+video_vae:
+  latent_channels: 4
+  base_channels: 16
+  spatial_compression: 4
+  temporal_compression: 4
+
+audio_vae:
+  latent_channels: 8
+  base_channels: 32
+  temporal_compression: 4
+
+dit:
+  dim: 64
+  depth: 2
+  num_heads: 1
+  patch_hw: 2
+  patch_audio_t: 2
+  text_dim: 64
+  text_depth: 1
+  text_heads: 1
+  enable_audio: true
+  bridge_every: 1
+
+flow:
+  num_sampling_steps: 4
+  guidance_scale: 2.0
+
+train:
+  batch_size: 4
+  steps: 10
+  warmup_steps: 2
+  log_every: 5
+  eval_every: 100000
+  out_dir: runs/smoke
+
+sft:
+  init_from: runs/smoke/dit/ckpt_last.pt
+  steps: 5
+  batch_size: 4
+  quality_quantile: 0.5
+  use_lora: true
+  out_dir: runs/smoke/sft
+
+grpo:
+  init_from: runs/smoke/sft/ckpt_last.pt
+  steps: 2
+  num_prompts: 2
+  group_size: 2
+  sampling_steps: 3
+  minibatch_size: 4
+  out_dir: runs/smoke/grpo
+
+dpo:
+  init_from: runs/smoke/sft/ckpt_last.pt
+  steps: 3
+  batch_size: 2
+  num_pairs: 4
+  candidates_per_prompt: 2
+  sampling_steps: 3
+  out_dir: runs/smoke/dpo
